@@ -12,9 +12,18 @@ from torch_geometric.data import DataLoader, DenseDataLoader as DenseLoader
 from torch_geometric.datasets import TUDataset
 from asap_pool_model import ASAP_Pool
 
+from sklearn.metrics import precision_recall_fscore_support
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import precision_recall_curve
+
 torch.backends.cudnn.benchmark = False
 
 from utils import settings
+
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s') # include timestamp
 
 
 class Trainer(object):
@@ -85,8 +94,8 @@ class Trainer(object):
             loss.backward()
             total_loss += loss.item() * self.num_graphs(data)
             self.optimizer.step()
-            if d_i % 10 == 0:
-                print("batch", d_i)
+            if d_i % 20 == 0:
+                logger.info("train batch %d", d_i)
         return total_loss / len(loader.dataset)
 
     # validate or test model
@@ -101,6 +110,58 @@ class Trainer(object):
             correct += pred.eq(data.y.view(-1)).sum().item()
 
         return correct / len(loader.dataset)
+
+    def evaluate(self, loader, thr=None, return_best_thr=False):
+        self.model.eval()
+
+        correct = 0
+        total = 0.
+        loss, prec, rec, f1 = 0., 0., 0., 0.
+        y_true, y_pred, y_score = [], [], []
+        for d_i, data in enumerate(loader):
+            data = data.to(self.device)
+            bs = data.y.size(0)
+
+            with torch.no_grad():
+                # pred = self.model(data).max(1)[1]
+                out = self.model(data)
+                pred = out.max(1)[1]
+
+            loss += F.nll_loss(out, data.y, reduction='sum').item()
+
+            y_true += data.y.data.tolist()
+            y_pred += out.max(1)[1].data.tolist()
+            y_score += out[:, 1].data.tolist()
+            total += bs
+
+            correct += pred.eq(data.y.view(-1)).sum().item()
+            if d_i % 50 == 0:
+                logger.info("eval batch %d", d_i)
+
+        if thr is not None:
+            logger.info("using threshold %.4f", thr)
+            y_score = np.array(y_score)
+            y_pred = np.zeros_like(y_score)
+            y_pred[y_score > thr] = 1
+
+        prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary")
+        auc = roc_auc_score(y_true, y_score)
+        logger.info("loss: %.4f AUC: %.4f Prec: %.4f Rec: %.4f F1: %.4f",
+                    loss / total, auc, prec, rec, f1)
+
+        if return_best_thr:
+            precs, recs, thrs = precision_recall_curve(y_true, y_score)
+            f1s = 2 * precs * recs / (precs + recs)
+            f1s = f1s[:-1]
+            thrs = thrs[~np.isnan(f1s)]
+            f1s = f1s[~np.isnan(f1s)]
+            best_thr = thrs[np.argmax(f1s)]
+            logger.info("best threshold=%4f, f1=%.4f", best_thr, np.max(f1s))
+            return [prec, rec, f1, auc], loss / len(loader.dataset), best_thr
+        else:
+            return [prec, rec, f1, auc], loss / len(loader.dataset), None
+
+        # return correct / len(loader.dataset)
 
     # save model locally
     def save_model(self, save_path):
@@ -213,6 +274,76 @@ class Trainer(object):
 
         return val_acc_mean, test_acc_mean
 
+    def run_new(self):
+        val_accs, test_accs = [], []
+
+        makeDirectory('torch_saved/')
+        save_path = 'torch_saved/{}'.format(self.p.name)
+
+        if self.p.restore:
+            self.load_model(save_path)
+            print('Successfully Loaded previous model')
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        # Reinitialise model and optimizer for each fold
+        self.model = self.addModel()
+        self.optimizer = self.addOptimizer()
+
+        dataset = self.data
+
+        num_training = int(len(dataset) * 0.5)
+        num_val = int(len(dataset) * 0.75) - num_training
+        num_test = len(dataset) - (num_training + num_val)
+        # training_set, validation_set, test_set = random_split(dataset, [num_training, num_val, num_test])
+        train_dataset = dataset[:num_training]
+        val_dataset = dataset[num_training:(num_training + num_val)]
+        test_dataset = dataset[(num_training + num_val):]
+
+        if 'adj' in train_dataset[0]:
+            train_loader = DenseLoader(train_dataset, self.p.batch_size, shuffle=True)
+            val_loader = DenseLoader(val_dataset, self.p.batch_size, shuffle=False)
+            test_loader = DenseLoader(test_dataset, self.p.batch_size, shuffle=False)
+        else:
+            train_loader = DataLoader(train_dataset, self.p.batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, self.p.batch_size, shuffle=False)
+            test_loader = DataLoader(test_dataset, self.p.batch_size, shuffle=False)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        best_val_acc, best_test_acc = 0.0, 0.0
+        best_thr = None
+
+        val_metrics, val_loss, thr = self.evaluate(val_loader, return_best_thr=True)
+        test_metrics, test_loss, _ = self.evaluate(test_loader, thr=0.5)
+
+        for epoch in range(1, self.p.max_epochs + 1):
+            train_loss = self.run_epoch(train_loader)
+            val_metrics, val_loss, thr = self.evaluate(val_loader, return_best_thr=True)
+            test_metrics, test_loss, _ = self.evaluate(test_loader, thr=thr)
+            val_auc = val_metrics[-1]
+
+            # lr_decay
+            if epoch % self.p.lr_decay_step == 0:
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = self.p.lr_decay_factor * param_group['lr']
+            # save model for best val score
+            if val_auc > best_val_acc:
+                best_val_acc = val_auc
+                best_thr = thr
+                self.save_model(save_path)
+
+            print('---[INFO]---{:03d}: Loss: {:.4f}\tVal Acc: {:.4f}'.format(epoch, train_loss, best_val_acc))
+            print('---[INFO]---{:03d}: Test metrics'.format(epoch), test_metrics)
+
+        # load best model for testing
+        self.load_model(save_path)
+        test_metrics, test_loss, _ = self.evaluate(test_loader, thr=thr)
+        print('---[INFO]---{:03d}: Test metrics'.format(epoch), test_metrics)
+
+
 
 if __name__ == '__main__':
 
@@ -266,11 +397,12 @@ if __name__ == '__main__':
 
         # start training the model
         model = Trainer(args)
-        val_acc, test_acc = model.run()
-        print('For seed {}\t Val Accuracy: {:.3f} \t Test Accuracy: {:.3f}\n'.format(seed, val_acc, test_acc))
-        avg_val.append(val_acc)
-        avg_test.append(test_acc)
+        # val_acc, test_acc = model.run()
+        model.run_new()
+        # print('For seed {}\t Val Accuracy: {:.3f} \t Test Accuracy: {:.3f}\n'.format(seed, val_acc, test_acc))
+        # avg_val.append(val_acc)
+        # avg_test.append(test_acc)
         counter += 1
 
-    print('Val Accuracy: {:.3f} ± {:.3f} Test Accuracy: {:.3f} ± {:.3f}'.format(np.mean(avg_val), np.std(avg_val),
-                                                                                np.mean(avg_test), np.std(avg_test)))
+    # print('Val Accuracy: {:.3f} ± {:.3f} Test Accuracy: {:.3f} ± {:.3f}'.format(np.mean(avg_val), np.std(avg_val),
+    #                                                                             np.mean(avg_test), np.std(avg_test)))
