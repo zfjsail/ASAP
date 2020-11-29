@@ -37,7 +37,7 @@ parser.add_argument('-num_layers', dest='num_layers', default=3, type=int, help=
 parser.add_argument('-lr_decay_step', dest='lr_decay_step', default=50, type=int, help='lr decay step')
 parser.add_argument('-lr_decay_factor', dest='lr_decay_factor', default=0.5, type=float, help='lr decay factor')
 
-parser.add_argument('-batch', dest='batch_size', default=2048, type=int, help='Batch size')
+parser.add_argument('-batch', dest='batch_size', default=128, type=int, help='Batch size')  # 2048 out of gpu mem
 parser.add_argument('-hid_dim', dest='hid_dim', default=64, type=int, help='hidden dims')
 parser.add_argument('-dropout_att', dest='dropout_att', default=0.1, type=float, help='dropout on attention scores')
 parser.add_argument('-lr', dest='lr', default=0.01, type=float, help='Learning rate')
