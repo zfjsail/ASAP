@@ -1,8 +1,10 @@
 import math, random, argparse, time, uuid
 import os, os.path as osp
 from os.path import join
+import shutil
 from helper import makeDirectory, set_gpu
 from dataset import DiagDataset
+from tensorboard_logger import tensorboard_logger
 
 import numpy as np
 import torch
@@ -24,6 +26,36 @@ import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s') # include timestamp
+
+parser = argparse.ArgumentParser(description='Neural Network Trainer Template')
+
+parser.add_argument('-model', dest='model', default='ASAP_Pool', help='Model to use')
+parser.add_argument('-data', dest='dataset', default='twitter', type=str, help='Dataset to use')
+parser.add_argument('-epoch', dest='max_epochs', default=100, type=int, help='Max epochs')
+parser.add_argument('-l2', dest='l2', default=5e-4, type=float, help='L2 regularization')
+parser.add_argument('-num_layers', dest='num_layers', default=3, type=int, help='Number of GCN Layers')
+parser.add_argument('-lr_decay_step', dest='lr_decay_step', default=50, type=int, help='lr decay step')
+parser.add_argument('-lr_decay_factor', dest='lr_decay_factor', default=0.5, type=float, help='lr decay factor')
+
+parser.add_argument('-batch', dest='batch_size', default=2048, type=int, help='Batch size')
+parser.add_argument('-hid_dim', dest='hid_dim', default=64, type=int, help='hidden dims')
+parser.add_argument('-dropout_att', dest='dropout_att', default=0.1, type=float, help='dropout on attention scores')
+parser.add_argument('-lr', dest='lr', default=0.01, type=float, help='Learning rate')
+parser.add_argument('-ratio', dest='ratio', default=0.5, type=float, help='ratio')
+
+parser.add_argument('-folds', dest='folds', default=10, type=int, help='Cross validation folds')
+
+parser.add_argument('-name', dest='name', default='test_' + str(uuid.uuid4())[:8], help='Name of the run')
+parser.add_argument('-gpu', dest='gpu', default='1', help='GPU to use')
+parser.add_argument('-restore', dest='restore', action='store_true', help='Model restoring')
+
+args = parser.parse_args()
+
+tensorboard_log_dir = 'tensorboard/%s_%s' % ("ASAP", args.dataset)
+os.makedirs(tensorboard_log_dir, exist_ok=True)
+shutil.rmtree(tensorboard_log_dir)
+tensorboard_logger.configure(tensorboard_log_dir)
+logger.info('tensorboard logging to %s', tensorboard_log_dir)
 
 
 class Trainer(object):
@@ -81,7 +113,7 @@ class Trainer(object):
         return torch.optim.Adam(self.model.parameters(), lr=self.p.lr, weight_decay=self.p.l2)
 
     # train model for an epoch
-    def run_epoch(self, loader):
+    def run_epoch(self, loader, epoch):
         self.model.train()
 
         total_loss = 0
@@ -96,6 +128,7 @@ class Trainer(object):
             self.optimizer.step()
             if d_i % 20 == 0:
                 logger.info("train batch %d", d_i)
+        tensorboard_logger.log_value('train_loss', total_loss / len(loader.dataset), epoch + 1)
         return total_loss / len(loader.dataset)
 
     # validate or test model
@@ -111,7 +144,7 @@ class Trainer(object):
 
         return correct / len(loader.dataset)
 
-    def evaluate(self, loader, thr=None, return_best_thr=False):
+    def evaluate(self, loader, epoch, thr=None, return_best_thr=False):
         self.model.eval()
 
         correct = 0
@@ -148,6 +181,14 @@ class Trainer(object):
         auc = roc_auc_score(y_true, y_score)
         logger.info("loss: %.4f AUC: %.4f Prec: %.4f Rec: %.4f F1: %.4f",
                     loss / total, auc, prec, rec, f1)
+
+        if return_best_thr:
+            log_desc = "valid_"
+        else:
+            log_desc = "test_"
+        tensorboard_logger.log_value(log_desc + 'loss', loss / total, epoch + 1)
+        tensorboard_logger.log_value(log_desc + 'auc', auc, epoch + 1)
+        tensorboard_logger.log_value(log_desc + 'f1', f1, epoch + 1)
 
         if return_best_thr:
             precs, recs, thrs = precision_recall_curve(y_true, y_score)
@@ -316,13 +357,13 @@ class Trainer(object):
         best_val_acc, best_test_acc = 0.0, 0.0
         best_thr = None
 
-        val_metrics, val_loss, thr = self.evaluate(val_loader, return_best_thr=True)
-        test_metrics, test_loss, _ = self.evaluate(test_loader, thr=0.5)
+        val_metrics, val_loss, thr = self.evaluate(val_loader, -1, return_best_thr=True)
+        test_metrics, test_loss, _ = self.evaluate(test_loader, -1, thr=0.5)
 
         for epoch in range(1, self.p.max_epochs + 1):
-            train_loss = self.run_epoch(train_loader)
-            val_metrics, val_loss, thr = self.evaluate(val_loader, return_best_thr=True)
-            test_metrics, test_loss, _ = self.evaluate(test_loader, thr=thr)
+            train_loss = self.run_epoch(train_loader, epoch)
+            val_metrics, val_loss, thr = self.evaluate(val_loader, epoch, return_best_thr=True)
+            test_metrics, test_loss, _ = self.evaluate(test_loader, epoch, thr=thr)
             val_auc = val_metrics[-1]
 
             # lr_decay
@@ -334,42 +375,19 @@ class Trainer(object):
                 best_val_acc = val_auc
                 best_thr = thr
                 self.save_model(save_path)
+                logger.info("************BEST UNTIL NOW**************")
 
             print('---[INFO]---{:03d}: Loss: {:.4f}\tVal Acc: {:.4f}'.format(epoch, train_loss, best_val_acc))
             print('---[INFO]---{:03d}: Test metrics'.format(epoch), test_metrics)
 
         # load best model for testing
         self.load_model(save_path)
-        test_metrics, test_loss, _ = self.evaluate(test_loader, thr=thr)
-        print('---[INFO]---{:03d}: Test metrics'.format(epoch), test_metrics)
-
+        test_metrics, test_loss, _ = self.evaluate(test_loader, self.p.max_epochs+1, thr=thr)
+        print('---[INFO]---Finally: Test metrics', test_metrics)
 
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description='Neural Network Trainer Template')
-
-    parser.add_argument('-model', dest='model', default='ASAP_Pool', help='Model to use')
-    parser.add_argument('-data', dest='dataset', default='twitter', type=str, help='Dataset to use')
-    parser.add_argument('-epoch', dest='max_epochs', default=100, type=int, help='Max epochs')
-    parser.add_argument('-l2', dest='l2', default=5e-4, type=float, help='L2 regularization')
-    parser.add_argument('-num_layers', dest='num_layers', default=3, type=int, help='Number of GCN Layers')
-    parser.add_argument('-lr_decay_step', dest='lr_decay_step', default=50, type=int, help='lr decay step')
-    parser.add_argument('-lr_decay_factor', dest='lr_decay_factor', default=0.5, type=float, help='lr decay factor')
-
-    parser.add_argument('-batch', dest='batch_size', default=128, type=int, help='Batch size')
-    parser.add_argument('-hid_dim', dest='hid_dim', default=64, type=int, help='hidden dims')
-    parser.add_argument('-dropout_att', dest='dropout_att', default=0.1, type=float, help='dropout on attention scores')
-    parser.add_argument('-lr', dest='lr', default=0.01, type=float, help='Learning rate')
-    parser.add_argument('-ratio', dest='ratio', default=0.5, type=float, help='ratio')
-
-    parser.add_argument('-folds', dest='folds', default=10, type=int, help='Cross validation folds')
-
-    parser.add_argument('-name', dest='name', default='test_' + str(uuid.uuid4())[:8], help='Name of the run')
-    parser.add_argument('-gpu', dest='gpu', default='1', help='GPU to use')
-    parser.add_argument('-restore', dest='restore', action='store_true', help='Model restoring')
-
-    args = parser.parse_args()
     if not args.restore:
         args.name = args.name + '_' + time.strftime('%d_%m_%Y') + '_' + time.strftime('%H:%M:%S')
 
