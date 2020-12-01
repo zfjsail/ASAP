@@ -31,7 +31,7 @@ parser = argparse.ArgumentParser(description='Neural Network Trainer Template')
 
 parser.add_argument('-model', dest='model', default='ASAP_Pool', help='Model to use')
 parser.add_argument('-data', dest='dataset', default='twitter', type=str, help='Dataset to use')
-parser.add_argument('-epoch', dest='max_epochs', default=100, type=int, help='Max epochs')
+parser.add_argument('-epoch', dest='max_epochs', default=200, type=int, help='Max epochs')
 parser.add_argument('-l2', dest='l2', default=5e-4, type=float, help='L2 regularization')
 parser.add_argument('-num_layers', dest='num_layers', default=3, type=int, help='Number of GCN Layers')
 parser.add_argument('-lr_decay_step', dest='lr_decay_step', default=50, type=int, help='lr decay step')
@@ -40,7 +40,7 @@ parser.add_argument('-lr_decay_factor', dest='lr_decay_factor', default=0.5, typ
 parser.add_argument('-batch', dest='batch_size', default=128, type=int, help='Batch size')  # 2048 out of gpu mem
 parser.add_argument('-hid_dim', dest='hid_dim', default=64, type=int, help='hidden dims')
 parser.add_argument('-dropout_att', dest='dropout_att', default=0.1, type=float, help='dropout on attention scores')
-parser.add_argument('-lr', dest='lr', default=0.01, type=float, help='Learning rate')
+parser.add_argument('-lr', dest='lr', default=0.003, type=float, help='Learning rate')
 parser.add_argument('-ratio', dest='ratio', default=0.5, type=float, help='ratio')
 
 parser.add_argument('-folds', dest='folds', default=10, type=int, help='Cross validation folds')
