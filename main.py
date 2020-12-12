@@ -30,7 +30,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s') # incl
 parser = argparse.ArgumentParser(description='Neural Network Trainer Template')
 
 parser.add_argument('-model', dest='model', default='ASAP_Pool', help='Model to use')
-parser.add_argument('-data', dest='dataset', default='twitter', type=str, help='Dataset to use')
+parser.add_argument('-data', dest='dataset', default='wechat', type=str, help='Dataset to use')
+parser.add_argument('-label-type', dest='label_type', default='click', type=str, help='Dataset to use')
 parser.add_argument('-epoch', dest='max_epochs', default=200, type=int, help='Max epochs')
 parser.add_argument('-l2', dest='l2', default=5e-4, type=float, help='L2 regularization')
 parser.add_argument('-num_layers', dest='num_layers', default=3, type=int, help='Number of GCN Layers')
@@ -51,7 +52,7 @@ parser.add_argument('-restore', dest='restore', action='store_true', help='Model
 
 args = parser.parse_args()
 
-tensorboard_log_dir = 'tensorboard/%s_%s' % ("ASAP", args.dataset)
+tensorboard_log_dir = 'tensorboard/%s_%s_%s' % ("ASAP", args.dataset, args.label_type)
 os.makedirs(tensorboard_log_dir, exist_ok=True)
 shutil.rmtree(tensorboard_log_dir)
 tensorboard_logger.configure(tensorboard_log_dir)
@@ -89,7 +90,7 @@ class Trainer(object):
 
     def load_self_data(self):
         file_dir = join(settings.DATA_DIR, self.p.dataset)
-        dataset = DiagDataset(root=file_dir)
+        dataset = DiagDataset(root=file_dir, label_type=self.p.label_type)
         dataset.data.edge_attr = None
         self.data = dataset
 
@@ -334,9 +335,15 @@ class Trainer(object):
 
         dataset = self.data
 
-        num_training = int(len(dataset) * 0.5)
-        num_val = int(len(dataset) * 0.75) - num_training
-        num_test = len(dataset) - (num_training + num_val)
+        if self.p.dataset != "wechat":
+            num_training = int(len(dataset) * 0.5)
+            num_val = int(len(dataset) * 0.75) - num_training
+            num_test = len(dataset) - (num_training + num_val)
+        else:
+            num_training = dataset.get_samples_num("train")
+            num_val = dataset.get_samples_num("valid")
+            num_test = dataset.get_samples_num("test")
+        logger.info("num train %d, num valid %d, num test %d", num_training, num_val, num_test)
         # training_set, validation_set, test_set = random_split(dataset, [num_training, num_val, num_test])
         train_dataset = dataset[:num_training]
         val_dataset = dataset[num_training:(num_training + num_val)]
